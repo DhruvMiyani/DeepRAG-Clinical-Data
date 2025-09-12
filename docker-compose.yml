@@ -1,0 +1,108 @@
+# Docker Compose configuration for DeepRAG Clinical Application
+version: '3.8'
+
+services:
+  # Main DeepRAG API service
+  deeprag-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DEFAULT_MODEL=gpt-5
+      - LOG_LEVEL=INFO
+      - CHUNK_SIZE=750
+      - CHUNK_OVERLAP=100
+      - RETRIEVER_K=6
+    volumes:
+      # Mount data directory (if you have local MIMIC-III data)
+      - ./nosocomial-risk-datasets-from-mimic-iii-1.0:/app/data:ro
+      # Mount logs directory
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      - redis
+    networks:
+      - deeprag-network
+
+  # Redis for caching (optional but recommended)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - deeprag-network
+
+  # Nginx reverse proxy (optional - for production)
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - deeprag-api
+    restart: unless-stopped
+    networks:
+      - deeprag-network
+
+  # Vector database (optional - if you want to use Qdrant instead of FAISS)
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+    restart: unless-stopped
+    networks:
+      - deeprag-network
+
+  # Monitoring with Prometheus (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+    networks:
+      - deeprag-network
+
+  # Grafana for visualization (optional)
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+    networks:
+      - deeprag-network
+
+volumes:
+  redis_data:
+  qdrant_storage:
+  grafana_data:
+
+networks:
+  deeprag-network:
+    driver: bridge
