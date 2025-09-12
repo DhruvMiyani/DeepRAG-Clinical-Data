@@ -19,6 +19,7 @@ from config import Config
 from deeprag_core import DeepRAGCore, MDPState, MDPAction, DecisionType
 from deeprag_training import DeepRAGTrainer
 from utils import FileManager, ClinicalDataProcessor, setup_logging
+from datasets import NosocomialDataLoader
 
 # Enhanced logging configuration
 setup_logging(log_level="DEBUG", log_file="deeprag_full_pipeline.log")
@@ -63,6 +64,9 @@ class DeepRAGPipeline:
         self.deeprag_core = None
         self.trainer = None
         
+        # Load clinical data automatically
+        self.clinical_loader = None
+        
         # Metrics tracking
         self.pipeline_metrics = {
             'total_questions_processed': 0,
@@ -74,7 +78,128 @@ class DeepRAGPipeline:
             'start_time': datetime.now().isoformat()
         }
         
+        # Initialize clinical knowledge base with real data
+        self.logger.info("Loading MIMIC-III clinical data...")
+        self._initialize_clinical_data()
+        
         self.logger.info("Pipeline initialization completed")
+    
+    def _initialize_clinical_data(self):
+        """Initialize clinical knowledge base with real MIMIC-III data"""
+        try:
+            # Initialize data loader
+            data_path = "/Users/dhruvmiyani/Downloads/Projects/RAG-On-Clinical-Data/nosocomial-risk-datasets-from-mimic-iii-1.0"
+            self.clinical_loader = NosocomialDataLoader(data_path)
+            
+            # Load all clinical datasets
+            all_datasets = self.clinical_loader.load_all_datasets()
+            
+            # Convert clinical records to documents for vector store
+            clinical_documents = self._convert_clinical_data_to_documents(all_datasets)
+            
+            if clinical_documents:
+                self.logger.info(f"Loaded {len(clinical_documents)} clinical documents")
+                # Setup vector store with real clinical data
+                self._setup_vector_store(clinical_documents)
+            else:
+                self.logger.warning("No clinical documents loaded, using sample data")
+                self._setup_vector_store(None)
+                
+        except Exception as e:
+            self.logger.error(f"Failed to load MIMIC-III clinical data: {e}")
+            self.logger.warning("Falling back to sample clinical data")
+            self._setup_vector_store(None)
+    
+    def _convert_clinical_data_to_documents(self, all_datasets: Dict) -> List[str]:
+        """Convert MIMIC-III clinical data to text documents for RAG"""
+        documents = []
+        
+        for condition, datasets in all_datasets.items():
+            condition_name = condition.upper()
+            
+            # Process chronologies (main clinical data)
+            for split in ['train', 'devel', 'test']:
+                chronologies_key = f"{split}_chronologies"
+                if chronologies_key in datasets:
+                    chronologies = datasets[chronologies_key]
+                    
+                    # Group by patient and create clinical narratives
+                    for subject_id, patient_data in chronologies.groupby('subject_id'):
+                        # Sort by timestamp
+                        patient_data = patient_data.sort_values('timestamp')
+                        
+                        # Create patient narrative
+                        narrative_parts = []
+                        narrative_parts.append(f"Patient ID: {subject_id}")
+                        narrative_parts.append(f"Condition: {condition_name}")
+                        
+                        # Add temporal sequence of events
+                        for _, row in patient_data.iterrows():
+                            event_text = f"Time: {row['timestamp']}, "
+                            
+                            # Add available clinical data
+                            if 'code' in row and pd.notna(row['code']):
+                                event_text += f"Clinical Code: {row['code']}, "
+                            if 'hadm_id' in row and pd.notna(row['hadm_id']):
+                                event_text += f"Admission ID: {row['hadm_id']}, "
+                            if 'value' in row and pd.notna(row['value']):
+                                event_text += f"Value: {row['value']}, "
+                            if 'text' in row and pd.notna(row['text']):
+                                event_text += f"Description: {row['text']}"
+                            
+                            narrative_parts.append(event_text.rstrip(', '))
+                        
+                        # Combine into full narrative
+                        full_narrative = "\n".join(narrative_parts)
+                        documents.append(full_narrative)
+                        
+                        # Stop if we have enough documents to avoid token limits
+                        if len(documents) >= 200:
+                            break
+                    
+                    if len(documents) >= 200:
+                        break
+                if len(documents) >= 200:
+                    break
+        
+        self.logger.info(f"Converted {len(documents)} clinical records to documents")
+        return documents
+    
+    def _setup_vector_store(self, documents: Optional[List[str]]):
+        """Setup vector store with clinical documents"""
+        try:
+            # Use provided documents or create sample ones
+            if documents is None or len(documents) == 0:
+                documents = self._create_sample_clinical_documents()
+                self.logger.info("Using sample clinical documents")
+            
+            # Split documents into chunks
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=self.config.CHUNK_SIZE,
+                chunk_overlap=self.config.CHUNK_OVERLAP
+            )
+            
+            doc_objects = [Document(page_content=doc) for doc in documents]
+            chunks = text_splitter.split_documents(doc_objects)
+            
+            self.logger.info(f"Created {len(chunks)} document chunks from {len(documents)} documents")
+            
+            # Create vector store
+            self.logger.info("Creating FAISS vector store with embeddings")
+            self.vector_store = FAISS.from_documents(chunks, self.embeddings)
+            self.retriever = self.vector_store.as_retriever(
+                search_kwargs={"k": self.config.RETRIEVER_K}
+            )
+            
+            # For basic RAG, we don't need DeepRAG core
+            # Just set it to None to indicate basic RAG mode
+            self.deeprag_core = None
+            
+            self.logger.info("Vector store setup completed successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to setup vector store: {e}")
+            raise
     
     def setup_clinical_knowledge_base(
         self,
@@ -189,7 +314,11 @@ class DeepRAGPipeline:
         }
         
         try:
-            if use_deeprag:
+            # Check if retriever is available
+            if not self.retriever:
+                raise Exception("Vector store not initialized. No clinical data available for retrieval.")
+            
+            if use_deeprag and self.deeprag_core is not None:
                 # Use DeepRAG approach
                 self.logger.info("Using DeepRAG approach with adaptive retrieval")
                 
@@ -214,25 +343,40 @@ class DeepRAGPipeline:
                 
             else:
                 # Use standard RAG approach
-                self.logger.info("Using standard RAG approach")
+                self.logger.info("Using basic RAG approach (DeepRAG not available)")
                 
                 # Simple retrieval and answer
                 docs = self.retriever.get_relevant_documents(question)
-                context = "\n".join([doc.page_content for doc in docs[:3]])
+                self.logger.info(f"Retrieved {len(docs)} documents for question")
                 
-                prompt = f"""Answer the following question using the provided context.
+                if not docs:
+                    raise Exception("No relevant documents found for the question")
                 
+                # Create context from retrieved documents
+                context_parts = []
+                for i, doc in enumerate(docs[:4]):  # Use up to 4 documents
+                    context_parts.append(f"Document {i+1}: {doc.page_content}")
+                
+                context = "\n\n".join(context_parts)
+                
+                prompt = f"""You are a clinical AI assistant. Answer the following question based on the provided clinical data context. Be accurate and specific.
+
 Question: {question}
 
-Context:
+Clinical Context:
 {context}
 
 Answer:"""
                 
+                self.logger.info("Generating answer using LLM")
                 response = self.llm.invoke(prompt)
-                result['answer'] = response.content if hasattr(response, 'content') else str(response)
-                result['retrievals'] = 1
+                answer = response.content if hasattr(response, 'content') else str(response)
+                
+                result['answer'] = answer
+                result['retrievals'] = len(docs)
                 result['success'] = True
+                
+                self.logger.info(f"Generated answer: {answer[:100]}...")
             
             # Calculate latency
             result['latency_ms'] = int((time.time() - start_time) * 1000)
