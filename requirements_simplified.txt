@@ -1,0 +1,10 @@
+openai
+langchain
+langchain-openai
+langchain-community
+pandas
+numpy
+scikit-learn
+faiss-cpu
+python-dotenv
+tqdm
