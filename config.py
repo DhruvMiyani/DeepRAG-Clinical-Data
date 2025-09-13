@@ -38,6 +38,39 @@ class Config:
     PARENT_CHUNK_SIZE: int = int(os.getenv("PARENT_CHUNK_SIZE", "750"))
     CHILD_CHUNK_SIZE: int = int(os.getenv("CHILD_CHUNK_SIZE", "200"))
     
+    # Azure AI Search Configuration (for DeepRAG)
+    AZURE_SEARCH_ENDPOINT: str = os.getenv("AZURE_SEARCH_ENDPOINT", "")
+    AZURE_SEARCH_KEY: str = os.getenv("AZURE_SEARCH_KEY", "")
+    AZURE_SEARCH_INDEX_NAME: str = os.getenv("AZURE_SEARCH_INDEX_NAME", "clinical-index")
+    
+    # Azure Cosmos DB Configuration (for Graph RAG)
+    COSMOS_DB_ENDPOINT: str = os.getenv("COSMOS_DB_ENDPOINT", "")
+    COSMOS_DB_KEY: str = os.getenv("COSMOS_DB_KEY", "")
+    COSMOS_DB_DATABASE: str = os.getenv("COSMOS_DB_DATABASE", "clinical-graph")
+    COSMOS_DB_CONTAINER: str = os.getenv("COSMOS_DB_CONTAINER", "clinical-entities")
+    
+    # Azure Storage Configuration
+    AZURE_STORAGE_ACCOUNT_NAME: str = os.getenv("AZURE_STORAGE_ACCOUNT_NAME", "")
+    AZURE_STORAGE_ACCOUNT_KEY: str = os.getenv("AZURE_STORAGE_ACCOUNT_KEY", "")
+    AZURE_CONTAINER_NAME: str = os.getenv("AZURE_CONTAINER_NAME", "clinical-docs")
+    
+    # Redis Cache Configuration
+    AZURE_REDIS_ENDPOINT: str = os.getenv("AZURE_REDIS_ENDPOINT", "")
+    AZURE_REDIS_KEY: str = os.getenv("AZURE_REDIS_KEY", "")
+    REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6380"))
+    
+    # DeepRAG Agent Configuration
+    SMART_AGENT_PROMPT_LOCATION: str = os.getenv("SMART_AGENT_PROMPT_LOCATION", "./prompts/smart_agent.yaml")
+    MAX_RUN_PER_QUESTION: int = int(os.getenv("MAX_RUN_PER_QUESTION", "10"))
+    MAX_QUESTION_TO_KEEP: int = int(os.getenv("MAX_QUESTION_TO_KEEP", "3"))
+    MAX_QUESTION_WITH_DETAIL_HIST: int = int(os.getenv("MAX_QUESTION_WITH_DETAIL_HIST", "1"))
+    
+    # Feature Flags
+    ENABLE_DEEPRAG: bool = os.getenv("ENABLE_DEEPRAG", "false").lower() == "true"
+    ENABLE_AZURE_SEARCH: bool = os.getenv("ENABLE_AZURE_SEARCH", "false").lower() == "true"
+    ENABLE_GRAPH_RAG: bool = os.getenv("ENABLE_GRAPH_RAG", "false").lower() == "true"
+    ENABLE_REDIS_CACHE: bool = os.getenv("ENABLE_REDIS_CACHE", "false").lower() == "true"
+    
     @classmethod
     def validate_config(cls) -> bool:
         """Validate that all required configuration values are set."""
@@ -84,3 +117,61 @@ class Config:
             model=cls.DEFAULT_MODEL,
             temperature=cls.DEFAULT_TEMPERATURE
         )
+    
+    @classmethod
+    def get_azure_search_client(cls):
+        """Get configured Azure AI Search client."""
+        if not cls.AZURE_SEARCH_ENDPOINT or not cls.AZURE_SEARCH_KEY:
+            return None
+        
+        try:
+            from azure.search.documents import SearchClient
+            from azure.core.credentials import AzureKeyCredential
+            
+            return SearchClient(
+                endpoint=cls.AZURE_SEARCH_ENDPOINT,
+                index_name=cls.AZURE_SEARCH_INDEX_NAME,
+                credential=AzureKeyCredential(cls.AZURE_SEARCH_KEY)
+            )
+        except ImportError:
+            print("Azure Search SDK not installed. Install with: pip install azure-search-documents")
+            return None
+    
+    @classmethod
+    def get_cosmos_client(cls):
+        """Get configured Azure Cosmos DB client."""
+        if not cls.COSMOS_DB_ENDPOINT or not cls.COSMOS_DB_KEY:
+            return None
+        
+        try:
+            from azure.cosmos import CosmosClient
+            
+            cosmos_client = CosmosClient(
+                cls.COSMOS_DB_ENDPOINT,
+                cls.COSMOS_DB_KEY
+            )
+            database = cosmos_client.get_database_client(cls.COSMOS_DB_DATABASE)
+            return database.get_container_client(cls.COSMOS_DB_CONTAINER)
+        except ImportError:
+            print("Azure Cosmos SDK not installed. Install with: pip install azure-cosmos")
+            return None
+    
+    @classmethod
+    def get_redis_client(cls):
+        """Get configured Redis client."""
+        if not cls.AZURE_REDIS_ENDPOINT or not cls.AZURE_REDIS_KEY:
+            return None
+        
+        try:
+            import redis
+            
+            return redis.Redis(
+                host=cls.AZURE_REDIS_ENDPOINT,
+                port=cls.REDIS_PORT,
+                password=cls.AZURE_REDIS_KEY,
+                ssl=True,
+                decode_responses=True
+            )
+        except ImportError:
+            print("Redis SDK not installed. Install with: pip install redis")
+            return None

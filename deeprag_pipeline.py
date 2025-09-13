@@ -21,6 +21,11 @@ from deeprag_training import DeepRAGTrainer
 from utils import FileManager, ClinicalDataProcessor, setup_logging
 from datasets import NosocomialDataLoader
 
+# DeepRAG components
+from src.agents.clinical_smart_agent import ClinicalSmartAgent
+from src.functions.search_vector_function import SearchVectorFunction, ClinicalSearchOrchestrator
+from src.ontology.clinical_ontology import clinical_ontology
+
 # Enhanced logging configuration
 setup_logging(log_level="DEBUG", log_file="deeprag_full_pipeline.log")
 logger = logging.getLogger(__name__)
@@ -64,6 +69,11 @@ class DeepRAGPipeline:
         self.deeprag_core = None
         self.trainer = None
         
+        # Initialize DeepRAG Smart Agent components
+        self.smart_agent = None
+        self.search_function = None
+        self.search_orchestrator = None
+        
         # Load clinical data automatically
         self.clinical_loader = None
         
@@ -81,6 +91,11 @@ class DeepRAGPipeline:
         # Initialize clinical knowledge base with real data
         self.logger.info("Loading MIMIC-III clinical data...")
         self._initialize_clinical_data()
+        
+        # Initialize DeepRAG smart agents after data is loaded
+        if Config.ENABLE_DEEPRAG:
+            self.logger.info("Initializing DeepRAG Smart Agents...")
+            self._initialize_deeprag_agents()
         
         self.logger.info("Pipeline initialization completed")
     
@@ -290,6 +305,70 @@ class DeepRAGPipeline:
         
         return documents
     
+    def _initialize_deeprag_agents(self):
+        """Initialize Microsoft DeepRAG smart agents and components"""
+        try:
+            # Get OpenAI client for agents
+            from openai import OpenAI
+            client = OpenAI(api_key=self.config.OPENAI_API_KEY)
+            
+            # Initialize search vector function
+            self.search_function = SearchVectorFunction(
+                logger=self.logger,
+                vector_retriever=self.retriever,
+                use_azure_search=Config.ENABLE_AZURE_SEARCH,
+                azure_search_client=Config.get_azure_search_client()
+            )
+            
+            # Initialize search orchestrator
+            self.search_orchestrator = ClinicalSearchOrchestrator(
+                search_function=self.search_function,
+                llm_client=client
+            )
+            
+            # Define clinical persona for the smart agent
+            clinical_persona = f"""You are a clinical research assistant specializing in hospital-acquired conditions using MIMIC-III data.
+
+Your expertise covers:
+- Hospital-Acquired Pressure Injuries (HAPI) - Clinical code C0392747
+- Hospital-Acquired Acute Kidney Injury (HAAKI) - Clinical code C0022116  
+- Hospital-Acquired Anemia (HAA) - Clinical code C0002871
+
+You have access to {len(self.retriever.get_relevant_documents("")) if self.retriever else "clinical"} documents from MIMIC-III dataset.
+
+Your capabilities include:
+1. Searching clinical records using semantic search with condition filtering
+2. Retrieving patient timelines and admission histories  
+3. Identifying risk factors for specific conditions
+4. Analyzing clinical observation codes and their meanings
+
+Use the available tools to provide accurate, evidence-based responses. Always cite specific clinical codes, patient data, or research findings when available.
+
+Current clinical ontology includes {len(clinical_ontology.entities)} entity types and {len(clinical_ontology.clinical_codes)} clinical codes."""
+            
+            # Initialize Clinical Smart Agent
+            self.smart_agent = ClinicalSmartAgent(
+                logger=self.logger,
+                client=client,
+                vector_retriever=self.retriever,
+                persona=clinical_persona,
+                model=self.config.DEFAULT_MODEL,
+                max_run_per_question=Config.MAX_RUN_PER_QUESTION,
+                max_question_to_keep=Config.MAX_QUESTION_TO_KEEP,
+                max_question_with_detail_hist=Config.MAX_QUESTION_WITH_DETAIL_HIST
+            )
+            
+            self.logger.info("✅ DeepRAG Smart Agents initialized successfully")
+            self.logger.info(f"   - Model: {self.config.DEFAULT_MODEL}")
+            self.logger.info(f"   - Azure Search: {'Enabled' if Config.ENABLE_AZURE_SEARCH else 'Disabled'}")
+            self.logger.info(f"   - Clinical Ontology: {len(clinical_ontology.entities)} entities")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Failed to initialize DeepRAG agents: {e}")
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
+            # Don't fail the entire pipeline if DeepRAG agents fail
+            self.smart_agent = None
+    
     def process_question(
         self,
         question: str,
@@ -318,7 +397,27 @@ class DeepRAGPipeline:
             if not self.retriever:
                 raise Exception("Vector store not initialized. No clinical data available for retrieval.")
             
-            if use_deeprag and self.deeprag_core is not None:
+            if use_deeprag and self.smart_agent is not None:
+                # Use Microsoft DeepRAG Smart Agent approach
+                self.logger.info("Using DeepRAG Smart Agent with tool orchestration")
+                
+                # Run the question through the smart agent
+                agent_result = self.smart_agent.run(question)
+                
+                if agent_result.get("success", False) and agent_result.get("response"):
+                    result['answer'] = agent_result.get("response", "No response generated")
+                    result['success'] = True
+                    result['retrievals'] = agent_result.get("tool_calls_made", 0)
+                    result['method'] = 'DeepRAG-SmartAgent'
+                    
+                    self.logger.info(f"Smart Agent processed question successfully")
+                    self.logger.info(f"Tool calls made: {agent_result.get('tool_calls_made', 0)}")
+                    
+                else:
+                    self.logger.warning("Smart Agent failed, falling back to basic RAG")
+                    # Fall through to basic RAG
+                    
+            elif use_deeprag and self.deeprag_core is not None:
                 # Use DeepRAG approach
                 self.logger.info("Using DeepRAG approach with adaptive retrieval")
                 
@@ -341,7 +440,7 @@ class DeepRAGPipeline:
                     if log_details:
                         self._log_trajectory(optimal_path)
                 
-            else:
+            if not result['success']:
                 # Use standard RAG approach
                 self.logger.info("Using basic RAG approach (DeepRAG not available)")
                 
