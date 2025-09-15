@@ -1,5 +1,13 @@
 # 🏥 DeepRAG Clinical Data Pipeline
 
+
+
+
+<img width="1409" height="723" alt="Screenshot 2025-09-14 at 8 01 44 PM" src="https://github.com/user-attachments/assets/bd284374-3cf8-4326-9334-675e4c216ded" />
+
+
+
+
 **Advanced RAG System for MIMIC-III Clinical Question Answering using DeepRAG Methodology**
 
 [![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
